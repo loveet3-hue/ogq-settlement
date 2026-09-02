@@ -17,6 +17,7 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter, quote_sheetname
 
 SUMMARY_SHEET = "요약"
 
@@ -70,6 +71,7 @@ def read_account(data):
     wb = openpyxl.load_workbook(io.BytesIO(data) if isinstance(data, (bytes, bytearray))
                                 else data, read_only=True, data_only=True)
     recs, raw_header, raw_rows = [], None, []
+    cols = None                       # 로우 시트의 (콘텐츠타입, 판매마켓, 판매금액) 컬럼 인덱스
     unknown_types, unknown_markets = set(), set()
     for ws in wb.worksheets:
         if ws.title.strip() == SUMMARY_SHEET:
@@ -84,20 +86,25 @@ def read_account(data):
         ti, mi, pi = (header.index(n) for n in need)
         if raw_header is None:
             raw_header = list(rows[0])
+            cols = (ti, mi, pi)
         for r in rows[1:]:
             if len(r) <= max(ti, mi, pi) or r[pi] is None:
                 continue
-            raw_rows.append(list(r))
+            row = list(r)
+            row[pi] = int(float(r[pi]))          # 금액을 숫자로 (SUMIFS가 문자열은 못 더함)
+            raw_rows.append(row)
             ctype = str(r[ti]).strip()
-            market = RAW_MARKET_MAP.get(str(r[mi]).strip())
+            raw_market = str(r[mi]).strip()
+            market = RAW_MARKET_MAP.get(raw_market)
             if ctype not in CONTENT_TYPES:
                 unknown_types.add(ctype)
                 continue
             if market is None:
                 unknown_markets.add(str(r[mi]).strip())
                 continue
-            recs.append((market, ctype, int(float(r[pi]))))
-    return recs, (raw_header, raw_rows), sorted(unknown_types), sorted(unknown_markets)
+            recs.append((market, ctype, int(float(r[pi])), raw_market))
+    return (recs, (raw_header, raw_rows, cols),
+            sorted(unknown_types), sorted(unknown_markets))
 
 
 def summarize(accounts, units=None):
@@ -108,9 +115,10 @@ def summarize(accounts, units=None):
     units = units or {}
     agg = {}
     for account, recs in accounts.items():
-        for market, ctype, amount in recs:
+        for market, ctype, amount, raw_market in recs:
             key = (account, market)
-            slot = agg.setdefault(key, {"정지형": [0, 0], "동작형": [0, 0]})
+            slot = agg.setdefault(key, {"정지형": [0, 0], "동작형": [0, 0], "_raw": set()})
+            slot["_raw"].add(raw_market)
             group, unit = CONTENT_TYPES[ctype]
             unit = units.get(ctype, unit)
             slot[group][0] += amount // unit if amount % unit == 0 else 0
@@ -133,7 +141,7 @@ def summarize(accounts, units=None):
             tech=_round(Decimal(total) * Decimal(tech)),
             pay=pay, market_fee=mk, creator=total - pay - mk,
             pay_rate=float(Decimal(pay_rate)), market_rate=float(Decimal(market_rate)),
-            odd=slot.get("_odd", []),
+            odd=slot.get("_odd", []), raw_markets=sorted(slot["_raw"]),
         ))
     rows.sort(key=lambda r: (r["account"], r["market"]))
 
@@ -152,11 +160,19 @@ _YELLOW = PatternFill("solid", fgColor="FFFFFF00")
 _ACC = '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)'
 
 
-def build_workbook(raws, rows, total_row):
+def build_workbook(raws, rows, total_row, units=None):
     """요약 시트 + 계정별 로우 데이터 시트로 새 워크북을 만들어 bytes로 반환.
 
-    raws: {계정명: (헤더, 행 리스트)}
+    요약 시트의 모든 숫자는 **수식**으로 들어간다.
+      판매 금액 = SUMIFS(로우 시트)      판매 개수 = 금액 / 단가
+      결제 수수료 = ROUND(합계 * VLOOKUP(요율표), 0)
+      마켓 수수료 = ROUNDDOWN(합계 * VLOOKUP(요율표), 0)
+      크리에이터 정산 금액 = 합계 - 결제 - 마켓
+    로우 데이터를 고치면 요약이 따라 바뀐다.
+
+    raws: {계정명: (헤더, 행 리스트, (타입열, 마켓열, 금액열))}
     """
+    units = units or {}
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     ws = wb.create_sheet(SUMMARY_SHEET)
@@ -171,34 +187,69 @@ def build_workbook(raws, rows, total_row):
         c.font = Font(bold=True, color="FFFFFFFF")
         c.alignment = Alignment(horizontal="center", vertical="center")
 
-    def put(r, values, bold=False, fmt="#,##0"):
-        for i, v in enumerate(values):
-            c = ws.cell(row=r, column=2 + i, value=v)
-            if i >= 2:
-                c.number_format = fmt
+    rate_ref = "$O$4:$R$%d" % (3 + len(MARKET_RATES))
+
+    def sumifs(account, group, raw_markets):
+        """해당 계정 시트에서 (콘텐츠타입, 판매마켓) 조건에 맞는 판매금액 합계."""
+        header, _, cols = raws[account]
+        if not cols:
+            return "0"
+        ti, mi, pi = cols
+        sheet = quote_sheetname(account)
+        tcol, mcol, pcol = (get_column_letter(i + 1) for i in (ti, mi, pi))
+        ctype = next(k for k, v in CONTENT_TYPES.items() if v[0] == group)
+        terms = ['SUMIFS(%s!$%s:$%s,%s!$%s:$%s,"%s",%s!$%s:$%s,"%s")'
+                 % (sheet, pcol, pcol, sheet, tcol, tcol, ctype,
+                    sheet, mcol, mcol, m)
+                 for m in raw_markets]
+        return "+".join(terms) if terms else "0"
+
+    r0 = 4
+    for i, row in enumerate(rows):
+        r = r0 + i
+        acc, market = row["account"], row["market"]
+        raw_markets = row.get("raw_markets") or []
+        s_unit = units.get("스티커", CONTENT_TYPES["스티커"][1])
+        m_unit = units.get("애니메이션 스티커", CONTENT_TYPES["애니메이션 스티커"][1])
+        values = [
+            acc, market,
+            "=IF(G{r}=0,0,G{r}/{u})".format(r=r, u=s_unit),      # D 정지형 개수
+            "=IF(H{r}=0,0,H{r}/{u})".format(r=r, u=m_unit),      # E 동작형 개수
+            "=D{r}+E{r}".format(r=r),                            # F 개수 합계
+            "=" + sumifs(acc, "정지형", raw_markets),            # G 정지형 금액
+            "=" + sumifs(acc, "동작형", raw_markets),            # H 동작형 금액
+            "=G{r}+H{r}".format(r=r),                            # I 금액 합계
+            "=ROUND(I{r}*VLOOKUP($C{r},{t},2,FALSE),0)".format(r=r, t=rate_ref),      # J 기술
+            "=ROUND(I{r}*VLOOKUP($C{r},{t},3,FALSE),0)".format(r=r, t=rate_ref),      # K 결제
+            # ROUNDDOWN 전에 ROUND(...,6)로 부동소수점 찌꺼기를 털어낸다.
+            # (42,000 × 0.2835 = 11906.9999999999982 → 보정 없으면 11,906)
+            "=ROUNDDOWN(ROUND(I{r}*VLOOKUP($C{r},{t},4,FALSE),6),0)".format(r=r, t=rate_ref),
+            "=I{r}-J{r}-K{r}-L{r}".format(r=r),                  # M 크리에이터
+        ]
+        for j, v in enumerate(values):
+            c = ws.cell(row=r, column=2 + j, value=v)
+            if j >= 2:
+                c.number_format = _ACC
                 c.alignment = Alignment(horizontal="right")
-            if bold:
-                c.font = Font(bold=True)
-            if i == 11:
+            if j == 11:
                 c.fill = _YELLOW
 
-    dash = "-"
-    r = 4
-    for row in rows:
-        put(r, [row["account"], row["market"],
-                row["static_cnt"] or dash, row["motion_cnt"] or dash, row["cnt"],
-                row["static_amt"] or dash, row["motion_amt"] or dash, row["amount"],
-                dash, row["pay"], row["market_fee"], row["creator"]])
-        r += 1
-    put(r, [total_row["account"], None,
-            total_row["static_cnt"], total_row["motion_cnt"], total_row["cnt"],
-            total_row["static_amt"], total_row["motion_amt"], total_row["amount"],
-            dash, total_row["pay"], total_row["market_fee"], total_row["creator"]],
-        bold=True, fmt=_ACC)
-    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
-    ws.cell(row=r, column=2).alignment = Alignment(horizontal="center")
+    # 합계 행
+    last = r0 + len(rows) - 1
+    rt = r0 + len(rows)
+    ws.cell(row=rt, column=2, value="합계").font = Font(bold=True)
+    ws.cell(row=rt, column=2).alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=rt, start_column=2, end_row=rt, end_column=3)
+    for j, col in enumerate("DEFGHIJKLM"):
+        c = ws.cell(row=rt, column=4 + j,
+                    value="=SUM({c}{a}:{c}{b})".format(c=col, a=r0, b=last))
+        c.font = Font(bold=True)
+        c.number_format = _ACC
+        c.alignment = Alignment(horizontal="right")
+        if col == "M":
+            c.fill = _YELLOW
 
-    # 우측 요율표
+    # 우측 요율표 (VLOOKUP 참조 대상)
     for i, name in enumerate(["마켓 구분", "기술 수수료", "결제 수수료", "마켓 수수료"]):
         ws.cell(row=3, column=15 + i, value=name).font = Font(bold=True)
     ws.column_dimensions["O"].width = 18.5
@@ -209,7 +260,7 @@ def build_workbook(raws, rows, total_row):
             c.number_format = "0.00%"
 
     # 계정별 로우 데이터 시트
-    for account, (header, data_rows) in raws.items():
+    for account, (header, data_rows, _cols) in raws.items():
         sh = wb.create_sheet(account)
         if header:
             sh.append(header)
