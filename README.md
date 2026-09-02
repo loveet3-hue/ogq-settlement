@@ -1,6 +1,12 @@
 # OGQ 정산
 
-정산 로우 데이터를 올리면 마켓별로 분류하고 수수료를 계산해 엑셀로 내려받는 로컬 웹앱입니다.
+정산 로우 데이터를 올리면 마켓별로 분류하고 수수료를 계산해 엑셀로 내려받는 웹앱입니다.
+
+**사내 공유 URL: https://ogq-settlement.streamlit.app**
+
+`main` 브랜치에 push하면 1~2분 뒤 자동으로 재배포됩니다.
+
+로컬에서 돌리려면:
 
 ```bash
 pip install -r requirements.txt
