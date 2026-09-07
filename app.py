@@ -57,6 +57,9 @@ def pct(v, digits=2):
     return '<td class="mut">-</td>' if not v else "%.*f%%" % (digits, v * 100)
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def num(v, dash_if_zero=False):
     return "-" if (dash_if_zero and not v) else format(v, ",")
 
@@ -257,7 +260,7 @@ def page_stars():
             except Exception as e:                               # noqa: BLE001
                 st.error("%s 파일을 읽지 못했습니다 — %s" % (name, e))
                 return
-            if not recs and not raw[1]:
+            if not recs and not raw["rows"]:
                 st.error("%s 파일에서 콘텐츠타입 · 판매마켓 · 판매금액 컬럼을 가진 시트를 "
                          "찾지 못했습니다." % name)
                 return
@@ -322,12 +325,47 @@ def page_stars():
                     '<tbody>%s</tbody></table></div>' % body, unsafe_allow_html=True)
         st.write("")
 
-        out = stars.build_workbook(raws, rows, total)
-        st.download_button("⬇ 정산 요약 엑셀 받기 (요약 + %s 시트)" % " + ".join(raws),
-                           out, "매출데이터(스타즈&유니즈)_%s_정산요약.xlsx"
-                           % datetime.now().strftime("%y%m"),
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary", use_container_width=True)
+        period = next((r["period"] for r in raws.values() if r["period"]),
+                      datetime.now().strftime("%y%m"))
+
+        st.subheader("다운로드")
+        st.markdown('<p class="hint">모든 파일의 요약 시트는 수식으로 들어갑니다. '
+                    '로우 데이터를 고치면 요약이 따라 바뀝니다.</p>', unsafe_allow_html=True)
+
+        files = [("전체", raws, rows)]
+        if len(raws) > 1:
+            for name in raws:
+                sub = [r for r in rows if r["account"] == name]
+                if sub:
+                    files.append((name, {name: raws[name]}, sub))
+
+        blobs = []
+        for label, sub_raws, sub_rows in files:
+            blobs.append((label,
+                          "정산요약_%s_%s.xlsx" % (label, period),
+                          stars.build_workbook(sub_raws, sub_rows,
+                                               stars.make_total(sub_rows))))
+
+        label, fname, blob = blobs[0]
+        st.download_button("⬇ 전체 요약 파일 받기 (요약 + %s 시트)" % " + ".join(raws),
+                           blob, fname, XLSX_MIME, type="primary",
+                           use_container_width=True)
+
+        if len(blobs) > 1:
+            cols = st.columns(len(blobs) - 1)
+            for col, (label, fname, blob) in zip(cols, blobs[1:]):
+                with col:
+                    st.download_button("⬇ %s 개별 파일" % label, blob, fname, XLSX_MIME,
+                                       key="dl_stars_%s" % label,
+                                       use_container_width=True)
+
+            zbuf = io.BytesIO()
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+                for _l, fn, b in blobs:
+                    z.writestr(fn, b)
+            st.download_button("📦 전체 + 개별 %d개 ZIP으로 받기" % len(blobs),
+                               zbuf.getvalue(), "정산요약_%s.zip" % period,
+                               "application/zip", use_container_width=True)
 
     with tab_rate:
         st.subheader("마켓별 수수료율")

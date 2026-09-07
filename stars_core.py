@@ -62,8 +62,20 @@ def _rounddown(x):
     return int(Decimal(x).quantize(Decimal("1"), rounding=ROUND_DOWN))
 
 
+def _period(values):
+    """'2026/08/31 22:20:14' 같은 값들에서 가장 많이 나온 연월을 'YYMM'으로."""
+    import collections as _c
+    import re as _re
+    seen = _c.Counter()
+    for v in values:
+        m = _re.match(r"(\d{4})[./\-](\d{1,2})", str(v).strip())
+        if m:
+            seen["%s%02d" % (m.group(1)[2:], int(m.group(2)))] += 1
+    return seen.most_common(1)[0][0] if seen else None
+
+
 def read_account(data):
-    """매출 로우 데이터 워크북 1개 -> (거래 리스트, 원본 행, 미등록 타입, 미등록 마켓)
+    """매출 로우 데이터 워크북 1개 -> (거래 리스트, raw dict, 미등록 타입, 미등록 마켓)
 
     '요약' 시트는 건너뛰고, 필수 컬럼을 가진 시트의 데이터를 모두 모은다.
     파일 하나가 계정 하나(스타즈 / 유니즈)에 해당한다.
@@ -72,6 +84,7 @@ def read_account(data):
                                 else data, read_only=True, data_only=True)
     recs, raw_header, raw_rows = [], None, []
     cols = None                       # 로우 시트의 (콘텐츠타입, 판매마켓, 판매금액) 컬럼 인덱스
+    dates = []
     unknown_types, unknown_markets = set(), set()
     for ws in wb.worksheets:
         if ws.title.strip() == SUMMARY_SHEET:
@@ -84,6 +97,7 @@ def read_account(data):
         if not all(n in header for n in need):
             continue
         ti, mi, pi = (header.index(n) for n in need)
+        di = header.index("일시") if "일시" in header else None
         if raw_header is None:
             raw_header = list(rows[0])
             cols = (ti, mi, pi)
@@ -93,6 +107,8 @@ def read_account(data):
             row = list(r)
             row[pi] = int(float(r[pi]))          # 금액을 숫자로 (SUMIFS가 문자열은 못 더함)
             raw_rows.append(row)
+            if di is not None and len(r) > di and r[di] is not None:
+                dates.append(r[di])
             ctype = str(r[ti]).strip()
             raw_market = str(r[mi]).strip()
             market = RAW_MARKET_MAP.get(raw_market)
@@ -103,8 +119,8 @@ def read_account(data):
                 unknown_markets.add(str(r[mi]).strip())
                 continue
             recs.append((market, ctype, int(float(r[pi])), raw_market))
-    return (recs, (raw_header, raw_rows, cols),
-            sorted(unknown_types), sorted(unknown_markets))
+    raw = dict(header=raw_header, rows=raw_rows, cols=cols, period=_period(dates))
+    return recs, raw, sorted(unknown_types), sorted(unknown_markets)
 
 
 def summarize(accounts, units=None):
@@ -145,12 +161,17 @@ def summarize(accounts, units=None):
         ))
     rows.sort(key=lambda r: (r["account"], r["market"]))
 
-    total_row = dict(
-        account="합계", market="",
-        **{k: sum(r[k] for r in rows) for k in
-           ("static_cnt", "motion_cnt", "cnt", "static_amt", "motion_amt",
-            "amount", "tech", "pay", "market_fee", "creator")})
-    return rows, total_row
+    return rows, make_total(rows)
+
+
+TOTAL_KEYS = ("static_cnt", "motion_cnt", "cnt", "static_amt", "motion_amt",
+              "amount", "tech", "pay", "market_fee", "creator")
+
+
+def make_total(rows):
+    """요약 행들의 합계 행."""
+    return dict(account="합계", market="",
+                **{k: sum(r[k] for r in rows) for k in TOTAL_KEYS})
 
 
 # ------------------------------------------------------------------ 엑셀 출력
@@ -170,7 +191,7 @@ def build_workbook(raws, rows, total_row, units=None):
       크리에이터 정산 금액 = 합계 - 결제 - 마켓
     로우 데이터를 고치면 요약이 따라 바뀐다.
 
-    raws: {계정명: (헤더, 행 리스트, (타입열, 마켓열, 금액열))}
+    raws: {계정명: {header, rows, cols, period}}
     """
     units = units or {}
     wb = openpyxl.Workbook()
@@ -191,7 +212,7 @@ def build_workbook(raws, rows, total_row, units=None):
 
     def sumifs(account, group, raw_markets):
         """해당 계정 시트에서 (콘텐츠타입, 판매마켓) 조건에 맞는 판매금액 합계."""
-        header, _, cols = raws[account]
+        cols = raws[account]["cols"]
         if not cols:
             return "0"
         ti, mi, pi = cols
@@ -260,13 +281,13 @@ def build_workbook(raws, rows, total_row, units=None):
             c.number_format = "0.00%"
 
     # 계정별 로우 데이터 시트
-    for account, (header, data_rows, _cols) in raws.items():
+    for account, raw in raws.items():
         sh = wb.create_sheet(account)
-        if header:
-            sh.append(header)
+        if raw["header"]:
+            sh.append(raw["header"])
             for c in sh[1]:
                 c.font = Font(bold=True)
-        for row in data_rows:
+        for row in raw["rows"]:
             sh.append(row)
 
     buf = io.BytesIO()

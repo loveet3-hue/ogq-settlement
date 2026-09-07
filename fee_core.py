@@ -17,6 +17,7 @@ import openpyxl
 from decimal import Decimal, ROUND_HALF_UP
 
 NAVER_SHARE = 0.15
+INFO_SHEET = "수수료 안내"
 
 
 def won(x):
@@ -193,6 +194,9 @@ def write_sheet(wb, market, rows, tmpl=None, merge=True):
     last = len(rows) + 2
     ws["A1"] = "네이버 수수료"
     ws["B1"] = "=SUM(I3:I%d)*%s" % (last, repr(market.rate))
+    ws["D1"] = ("판매액 합계 × %s  (결제 %s + 마켓 %s 차감 후 15%%)  ·  자세한 내용은 '%s' 시트"
+                % (_pct(market.rate, 5), _pct(market.pay_fee), _pct(market.market_fee, 3),
+                   INFO_SHEET))
     for col, h in zip(COLS, FULL_HEADERS):
         ws["%s2" % col] = h
     for i, r in enumerate(rows, start=3):
@@ -211,6 +215,87 @@ def write_sheet(wb, market, rows, tmpl=None, merge=True):
     total = sum(r[8] for r in rows)
     return dict(sheet=name, rows=len(rows), merged=merged_from,
                 total=total, fee=won(total * market.rate))
+
+
+def _pct(v, digits=2):
+    return "-" if not v else ("%.*f%%" % (digits, v * 100)).rstrip()
+
+
+def write_info_sheet(wb, market):
+    """파일 설명과 마켓별 수수료율을 담은 안내 시트를 맨 뒤에 만든다."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    if INFO_SHEET in wb.sheetnames:
+        del wb[INFO_SHEET]
+    ws = wb.create_sheet(INFO_SHEET)
+    for col, w in zip("ABCDEFG", (22, 16, 16, 18, 20, 16, 22)):
+        ws.column_dimensions[col].width = w
+
+    head = Font(bold=True, size=13)
+    bold = Font(bold=True)
+    label = Font(bold=True, color="FF44546A")
+    band = PatternFill("solid", fgColor="FF44546A")
+    mine = PatternFill("solid", fgColor="FFFFF2CC")
+
+    def put(r, c, v, font=None, fill=None, fmt=None, align=None):
+        cell = ws.cell(row=r, column=c, value=v)
+        if font:
+            cell.font = font
+        if fill:
+            cell.fill = fill
+        if fmt:
+            cell.number_format = fmt
+        if align:
+            cell.alignment = Alignment(horizontal=align)
+        return cell
+
+    put(1, 1, "OGQ 정산 — 네이버 출신 작가 정산", head)
+    put(2, 1, "생성기: https://ogq-settlement.streamlit.app")
+
+    put(4, 1, "이 파일", label)
+    for i, (k, v) in enumerate([
+            ("판매마켓", market.key),
+            ("추합본 파일", market.filename),
+            ("시트 주기", "분기별 (한 시트에 3개월)" if market.cycle == "quarter"
+                          else "월별 — 정산월 = 판매월 + %d" % market.offset),
+            ("만든 날짜", datetime.now().strftime("%Y-%m-%d")),
+    ]):
+        put(5 + i, 1, k, bold)
+        put(5 + i, 2, v)
+
+    put(10, 1, "수수료 계산", label)
+    put(11, 1, "정산 대상 금액 = 판매액 − 결제 수수료 − 마켓 수수료")
+    put(12, 1, "네이버 수수료 = 정산 대상 금액 × 15%")
+    put(13, 1, "→ 판매액 대비 실효율", bold)
+    put(13, 3, market.rate, None, None, "0.00000%")
+    put(14, 1, "각 정산 시트 B1 = SUM(가격) × 실효율")
+
+    put(16, 1, "마켓별 수수료율", label)
+    for i, name in enumerate(["판매마켓", "결제 수수료", "마켓 수수료",
+                              "정산 대상 비율", "네이버 몫", "판매액 대비 실효율"]):
+        put(17, 1 + i, name, Font(bold=True, color="FFFFFFFF"), band, None, "center")
+    for i, m in enumerate(MARKETS):
+        r = 18 + i
+        fill = mine if m.key == market.key else None
+        put(r, 1, m.key, bold if fill else None, fill)
+        put(r, 2, _pct(m.pay_fee), None, fill, None, "right")
+        put(r, 3, _pct(m.market_fee, 3), None, fill, None, "right")
+        put(r, 4, m.settle_ratio, None, fill, "0.000%")
+        put(r, 5, NAVER_SHARE, None, fill, "0%")
+        put(r, 6, m.rate, bold if fill else None, fill, "0.00000%")
+    put(18 + len(MARKETS), 1, "※ 노란색이 이 파일의 마켓입니다.")
+
+    r = 20 + len(MARKETS)
+    put(r, 1, "참고", label)
+    for i, line in enumerate([
+            "REFUNDMENT(환불)는 가격이 음수로 들어와 SUM에서 자동으로 차감됩니다.",
+            "새 정산분은 항상 맨 앞 시트로 추가되고, 과거 시트와 서식은 그대로 둡니다.",
+            "채팅+ OGQ마켓만 분기 단위 시트라 같은 분기 시트에 이어붙입니다 "
+            "(거래 ID로 중복 제거).",
+            "수수료율이 바뀌면 이 파일이 아니라 생성기에서 고쳐야 다음 달부터 반영됩니다.",
+    ]):
+        put(r + 1 + i, 1, "· " + line)
+    return ws
 
 
 def detect_market(wb):
@@ -253,6 +338,7 @@ def build(records, existing=None, merge=True):
             wb.remove(wb.active)
             tmpl = None
         info = write_sheet(wb, market, rows, tmpl=tmpl, merge=merge)
+        write_info_sheet(wb, market)
         buf = io.BytesIO()
         wb.save(buf)
         info.update(market=market.label, key=market.key, rate=market.rate,
