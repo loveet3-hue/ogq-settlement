@@ -86,7 +86,7 @@ with st.sidebar:
 # ════════════════════════════════════════════════ 1. 네이버 출신 작가 정산
 def page_naver():
     st.caption("타 마켓 판매 로우 데이터 CSV → 마켓별 분류 → 네이버 수수료 계산 → 추합본 엑셀")
-    tab_build, tab_calc, tab_rate = st.tabs(["추합본 생성", "수수료 계산기", "수수료율 안내"])
+    tab_build, tab_calc = st.tabs(["추합본 생성", "수수료 계산기"])
 
     with tab_build:
         left, right = st.columns([1, 1], gap="large")
@@ -237,33 +237,11 @@ def page_naver():
                     '마지막 네이버 수수료만 원 단위로 반올림합니다.</p>',
                     unsafe_allow_html=True)
 
-    with tab_rate:
-        st.subheader("마켓별 수수료율 · 추합본 규칙")
-        html_table(["판매마켓 (CSV 값)", "결제", "마켓", "정산 대상 비율", "판매액 대비 실효율",
-                    "추합본 파일", "시트 주기"],
-                   [["<td><b>%s</b></td>" % m.key, pct(m.pay_fee), pct(m.market_fee, 3),
-                     "%.3f%%" % (m.settle_ratio * 100),
-                     '<td class="hi">%.5f%%</td>' % (m.rate * 100),
-                     "<td>%s</td>" % m.filename,
-                     "<td>%s</td>" % ("분기별" if m.cycle == "quarter"
-                                      else "월별 (판매월 +%d)" % m.offset)]
-                    for m in core.MARKETS])
-        st.markdown("""
-**시트 규칙**
-
-- B1 = `=SUM(I3:In) * 실효율` — 기존 추합본과 동일한 수식을 넣습니다.
-- 2행이 헤더, 3행부터 데이터. 서식은 올려주신 기존 파일에서 그대로 복제합니다.
-- `REFUNDMENT`는 가격이 음수인 채로 SUM에 포함되어 자동 차감됩니다.
-- **채팅+ OGQ마켓만 분기 시트**입니다. 기존 추합본을 꼭 함께 올려주세요.
-        """)
-
 
 # ════════════════════════════════════ 2. SOOP 이모티콘 (스타즈&유니즈) 정산
 def page_stars():
     st.caption("스타즈 · 유니즈 월별 매출 로우 데이터 → 계정 · 마켓별 판매 집계 → 정산 요약 엑셀")
-    tab_sum, tab_rate = st.tabs(["정산 요약", "수수료율 안내"])
-
-    with tab_sum:
+    with st.container():
         ACCOUNTS = ["스타즈", "유니즈"]
         cols = st.columns(len(ACCOUNTS), gap="large")
         uploads = {}
@@ -397,25 +375,6 @@ def page_stars():
             st.download_button("📦 전체 + 개별 %d개 ZIP으로 받기" % len(blobs),
                                zbuf.getvalue(), "정산요약_%s.zip" % period,
                                "application/zip", use_container_width=True)
-
-    with tab_rate:
-        st.subheader("마켓별 수수료율")
-        html_table(["마켓 구분", "기술 수수료", "결제 수수료", "마켓 수수료", "크리에이터"],
-                   [["<td><b>%s</b></td>" % m,
-                     pct(float(t), 0), pct(float(p)), pct(float(k)),
-                     '<td class="hi">%.2f%%</td>' % ((1 - float(t) - float(p) - float(k)) * 100)]
-                    for m, (t, p, k) in stars.MARKET_RATES.items()])
-        st.markdown("""
-**계산 규칙**
-
-- 정지형 = 콘텐츠타입 `스티커` (단가 2,000원), 동작형 = `애니메이션 스티커` (단가 3,000원)
-- **판매 개수 = 판매 금액 ÷ 단가** — 한 건에 여러 개를 살 수 있어 행 수와 다릅니다.
-  환불은 금액이 음수로 들어와 개수·금액에서 함께 차감됩니다.
-- 결제 수수료 = `ROUND(판매 금액 합계 × 결제율, 0)`
-- 마켓 수수료 = `ROUNDDOWN(판매 금액 합계 × 마켓율, 0)` — **일반 크리에이터 요율의 2배**
-  (SOOP 14.175% → 28.35%, NAVER 13.85% → 27.7%)
-- 크리에이터 정산 금액 = 판매 금액 합계 − 결제 수수료 − 마켓 수수료
-        """)
 
 
 (page_naver if page == PAGES[0] else page_stars)()

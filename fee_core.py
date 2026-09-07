@@ -465,8 +465,8 @@ def build_combined(results, title="네이버 출신 작가 정산"):
     red = Font(bold=True, color="FFC00000")
     money = FMT_MONEY
 
-    for col, w in zip("BCDEFGHIJKL",
-                      (18, 24, 9, 15, 13, 15, 13, 15, 16, 11, 15)):
+    for col, w in zip("BCDEFGHIJK",
+                      (20, 24, 16, 13, 16, 13, 16, 17, 11, 15)):
         ws.column_dimensions[col].width = w
 
     ws["B1"] = title + " — 전체 합본"
@@ -474,9 +474,9 @@ def build_combined(results, title="네이버 출신 작가 정산"):
     ws["B2"] = ("판매액 − 결제 수수료 − 마켓 수수료 = 정산 대상 금액,"
                 " 그 금액의 15%가 정산금입니다.")
 
-    headers = ["판매마켓", "정산 시트", "건수", "판매액", "① 결제 수수료율",
-               "① 결제 수수료", "② 마켓 수수료율", "② 마켓 수수료",
-               "정산 대상 금액", "네이버 몫", "정산금"]
+    headers = ["판매마켓", "정산 시트", "판매액", "① 결제 수수료율", "① 결제 수수료",
+               "② 마켓 수수료율", "② 마켓 수수료", "정산 대상 금액",
+               "네이버 몫", "정산금"]
     for i, name in enumerate(headers):
         c = ws.cell(row=4, column=2 + i, value=name)
         c.fill = band
@@ -491,28 +491,27 @@ def build_combined(results, title="네이버 출신 작가 정산"):
         n = len(res["records"]) + 1
         ws.cell(row=r, column=2, value=m.label).font = bold
         ws.cell(row=r, column=3, value=res["sheet"])
-        ws.cell(row=r, column=4, value=len(res["records"])).number_format = "#,##0"
-        ws.cell(row=r, column=5, value="=SUM('%s'!I2:I%d)" % (sheet, n)).number_format = money
-        ws.cell(row=r, column=6, value=m.pay_fee).number_format = FMT_RATE
-        ws.cell(row=r, column=7, value="=E%d*F%d" % (r, r)).number_format = money
-        ws.cell(row=r, column=8, value=m.market_fee).number_format = FMT_RATE
-        ws.cell(row=r, column=9, value="=E%d*H%d" % (r, r)).number_format = money
-        ws.cell(row=r, column=10,
-                value="=E%d-G%d-I%d" % (r, r, r)).number_format = money
-        ws.cell(row=r, column=11, value=NAVER_SHARE).number_format = "0%"
-        c = ws.cell(row=r, column=12,
-                    value="=" + round_even_formula("J%d*K%d" % (r, r)))
-        c.number_format = "#,##0"
+        ws.cell(row=r, column=4, value="=SUM('%s'!I2:I%d)" % (sheet, n)).number_format = money
+        ws.cell(row=r, column=5, value=m.pay_fee).number_format = FMT_RATE
+        ws.cell(row=r, column=6, value="=D%d*E%d" % (r, r)).number_format = money
+        ws.cell(row=r, column=7, value=m.market_fee).number_format = FMT_RATE
+        ws.cell(row=r, column=8, value="=D%d*G%d" % (r, r)).number_format = money
+        ws.cell(row=r, column=9,
+                value="=D%d-F%d-H%d" % (r, r, r)).number_format = money
+        ws.cell(row=r, column=10, value=NAVER_SHARE).number_format = "0%"
+        c = ws.cell(row=r, column=11,
+                    value="=" + round_even_formula("I%d*J%d" % (r, r)))
+        c.number_format = FMT_WON
         c.font = red
 
     rt = r0 + len(results)
     ws.cell(row=rt, column=2, value="합계").font = bold
-    for col in "DEGIJL":
+    for col in "DFHIK":
         c = ws.cell(row=rt, column=ord(col) - 64,
                     value="=SUM(%s%d:%s%d)" % (col, r0, col, rt - 1))
-        c.number_format = "#,##0" if col in "DL" else money
-        c.font = red if col == "L" else bold
-    for col in range(2, 13):
+        c.number_format = FMT_WON if col == "K" else money
+        c.font = red if col == "K" else bold
+    for col in range(2, 12):
         ws.cell(row=rt, column=col).fill = yellow
 
     ws.cell(row=rt + 2, column=2,
