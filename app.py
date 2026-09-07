@@ -65,8 +65,10 @@ def num(v, dash_if_zero=False):
 
 
 def money(v):
-    """소수점이 있으면 살려서 보여준다 (마켓 수수료 1,417.5 처럼)."""
+    """소수점이 있으면 살려서 보여준다 (마켓 수수료 1,417.5 처럼). 0은 '-'."""
     f = float(v)
+    if f == 0:
+        return "-"
     return format(int(f), ",") if f == int(f) else format(f, ",.2f")
 
 

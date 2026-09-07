@@ -20,6 +20,10 @@ import tables
 
 NAVER_SHARE = 0.15
 INFO_SHEET = "수수료 안내"
+# 0이면 '-'로 보이게 (회사 계산기와 같은 표기). 값은 0 그대로라 수식에는 영향 없음.
+FMT_MONEY = '#,##0.00;-#,##0.00;"-"'
+FMT_RATE = '0.000%;-0.000%;"-"'
+FMT_WON = '#,##0;-#,##0;"-"' 
 
 
 def won(x):
@@ -292,7 +296,7 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
     label = Font(bold=True, color="FF44546A", size=11)
     band = PatternFill("solid", fgColor="FF44546A")
     mine = PatternFill("solid", fgColor="FFFFF2CC")
-    money = "#,##0.00;-#,##0.00"
+    money = FMT_MONEY
 
     def put(r, c, v, font=None, fill=None, fmt=None, align=None):
         cell = ws.cell(row=r, column=c, value=v)
@@ -339,10 +343,10 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
         put(h + 1, 1, "판매액 합계", bold)
         put(h + 1, 3, "=SUM(%s)" % ref, None, None, money)
         put(h + 2, 1, "① 결제 수수료")
-        put(h + 2, 2, market.pay_fee, None, None, "0.000%")
+        put(h + 2, 2, market.pay_fee, None, None, FMT_RATE)
         put(h + 2, 3, "=C%d*B%d" % (h + 1, h + 2), None, None, money)
         put(h + 3, 1, "② 마켓 수수료")
-        put(h + 3, 2, market.market_fee, None, None, "0.000%")
+        put(h + 3, 2, market.market_fee, None, None, FMT_RATE)
         put(h + 3, 3, "=C%d*B%d" % (h + 1, h + 3), None, None, money)
         put(h + 4, 1, "정산 대상 금액 = 판매액 − ① − ②", bold)
         put(h + 4, 3, "=C%d-C%d-C%d" % (h + 1, h + 2, h + 3), bold, None, money)
@@ -363,8 +367,8 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
         rr = r + 2 + i
         fill = mine if (market and m.key == market.key) else None
         put(rr, 1, m.label, bold if fill else None, fill)
-        put(rr, 2, m.pay_fee, None, fill, "0.000%")
-        put(rr, 3, m.market_fee, None, fill, "0.000%")
+        put(rr, 2, m.pay_fee, None, fill, FMT_RATE)
+        put(rr, 3, m.market_fee, None, fill, FMT_RATE)
         put(rr, 4, m.settle_ratio, None, fill, "0.000%")
         put(rr, 5, NAVER_SHARE, None, fill, "0%")
         put(rr, 6, m.rate, bold if fill else None, fill, "0.00000%")
@@ -459,7 +463,7 @@ def build_combined(results, title="네이버 출신 작가 정산"):
     white = Font(bold=True, color="FFFFFFFF")
     bold = Font(bold=True)
     red = Font(bold=True, color="FFC00000")
-    money = "#,##0.00;-#,##0.00"
+    money = FMT_MONEY
 
     for col, w in zip("BCDEFGHIJKL",
                       (18, 24, 9, 15, 13, 15, 13, 15, 16, 11, 15)):
@@ -489,9 +493,9 @@ def build_combined(results, title="네이버 출신 작가 정산"):
         ws.cell(row=r, column=3, value=res["sheet"])
         ws.cell(row=r, column=4, value=len(res["records"])).number_format = "#,##0"
         ws.cell(row=r, column=5, value="=SUM('%s'!I2:I%d)" % (sheet, n)).number_format = money
-        ws.cell(row=r, column=6, value=m.pay_fee).number_format = "0.000%"
+        ws.cell(row=r, column=6, value=m.pay_fee).number_format = FMT_RATE
         ws.cell(row=r, column=7, value="=E%d*F%d" % (r, r)).number_format = money
-        ws.cell(row=r, column=8, value=m.market_fee).number_format = "0.000%"
+        ws.cell(row=r, column=8, value=m.market_fee).number_format = FMT_RATE
         ws.cell(row=r, column=9, value="=E%d*H%d" % (r, r)).number_format = money
         ws.cell(row=r, column=10,
                 value="=E%d-G%d-I%d" % (r, r, r)).number_format = money
