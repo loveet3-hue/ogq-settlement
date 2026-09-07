@@ -14,7 +14,7 @@ from copy import copy
 from datetime import datetime
 
 import openpyxl
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_EVEN
 
 import tables
 
@@ -23,9 +23,23 @@ INFO_SHEET = "수수료 안내"
 
 
 def won(x):
-    """엑셀 ROUND와 동일한 사사오입(0.5는 올림)."""
+    """원 단위 반올림. 정확히 0.5인 경우는 짝수 쪽으로 붙인다.
+
+    6,000 × 0.14175 = 850.5 → 850,  10,000 × 0.14175 = 1,417.5 → 1,418
+    """
     d = x if isinstance(x, Decimal) else Decimal(repr(float(x)))
-    return int(d.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return int(d.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+
+
+def round_even_formula(expr):
+    """엑셀에는 짝수쪽 반올림이 없어 직접 만든다.
+
+    안쪽 ROUND(...,6)은 부동소수점 찌꺼기 제거용
+    (없으면 6,000×0.14175 가 850.4999999999999 로 계산된다).
+    정확히 .5면 2*ROUND(x/2,0) 이 짝수 쪽으로 붙고, 아니면 보통 반올림.
+    """
+    e = "ROUND(%s,6)" % expr
+    return "IF(MOD({e}*2,2)=1,2*ROUND({e}/2,0),ROUND({e},0))".format(e=e)
 
 
 def settle(total, market):
@@ -229,9 +243,7 @@ def write_sheet(wb, market, rows, tmpl=None, merge=True):
     last = len(rows) + 2
     total_ref = "SUM(I3:I%d)" % last
     ws["A1"] = "네이버 수수료"
-    # 안쪽 ROUND(...,6)이 없으면 6,000 × 0.14175 가 850.4999999999999 로 계산돼
-    # 850으로 잘린다 (정답 851).
-    ws["B1"] = "=ROUND(ROUND(%s*%s,6),0)" % (total_ref, repr(market.rate))
+    ws["B1"] = "=" + round_even_formula("%s*%s" % (total_ref, repr(market.rate)))
     ws["D1"] = ("판매액에서 결제 수수료 %s, 마켓 수수료 %s를 뺀 정산 대상 금액의 15%%  "
                 "(판매액 대비 %s)  ·  계산 과정은 '%s' 시트"
                 % (_pct(market.pay_fee), _pct(market.market_fee, 3),
@@ -335,7 +347,8 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
         put(h + 4, 3, "=C%d-C%d-C%d" % (h + 1, h + 2, h + 3), bold, None, money)
         put(h + 5, 1, "네이버 수수료 (정산금)", bold, mine)
         put(h + 5, 2, NAVER_SHARE, None, mine, "0%")
-        put(h + 5, 3, "=ROUND(ROUND(C%d*B%d,6),0)" % (h + 4, h + 5), bold, mine, "#,##0")
+        put(h + 5, 3, "=" + round_even_formula("C%d*B%d" % (h + 4, h + 5)),
+            bold, mine, "#,##0")
         put(h + 6, 1, "판매액 대비 실효율")
         put(h + 6, 2, "=IF(C%d=0,0,C%d/C%d)" % (h + 1, h + 5, h + 1), None, None, "0.00000%")
         put(h + 7, 1, "→ 정산 시트 B1 셀의 값과 같습니다.")
@@ -483,7 +496,7 @@ def build_combined(results, title="네이버 출신 작가 정산"):
                 value="=E%d-G%d-I%d" % (r, r, r)).number_format = money
         ws.cell(row=r, column=11, value=NAVER_SHARE).number_format = "0%"
         c = ws.cell(row=r, column=12,
-                    value="=ROUND(ROUND(J%d*K%d,6),0)" % (r, r))
+                    value="=" + round_even_formula("J%d*K%d" % (r, r)))
         c.number_format = "#,##0"
         c.font = red
 
