@@ -19,6 +19,8 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter, quote_sheetname
 
+import tables
+
 SUMMARY_SHEET = "요약"
 
 # 콘텐츠타입 -> (구분, 단가)
@@ -74,25 +76,21 @@ def _period(values):
     return seen.most_common(1)[0][0] if seen else None
 
 
-def read_account(data):
+def read_account(data, filename=""):
     """매출 로우 데이터 워크북 1개 -> (거래 리스트, raw dict, 미등록 타입, 미등록 마켓)
 
     '요약' 시트는 건너뛰고, 필수 컬럼을 가진 시트의 데이터를 모두 모은다.
     파일 하나가 계정 하나(스타즈 / 유니즈)에 해당한다.
     """
-    wb = openpyxl.load_workbook(io.BytesIO(data) if isinstance(data, (bytes, bytearray))
-                                else data, read_only=True, data_only=True)
+    sheets = tables.load_sheets(data, filename)
     recs, raw_header, raw_rows = [], None, []
     cols = None                       # 로우 시트의 (콘텐츠타입, 판매마켓, 판매금액) 컬럼 인덱스
     dates = []
     unknown_types, unknown_markets = set(), set()
-    for ws in wb.worksheets:
-        if ws.title.strip() == SUMMARY_SHEET:
+    for title, rows in sheets:
+        if title.strip() == SUMMARY_SHEET or not rows:
             continue
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            continue
-        header = [str(c).strip() if c is not None else "" for c in rows[0]]
+        header = [tables.text(c) for c in rows[0]]
         need = ("콘텐츠타입", "판매마켓", "판매금액")
         if not all(n in header for n in need):
             continue
@@ -105,20 +103,20 @@ def read_account(data):
             if len(r) <= max(ti, mi, pi) or r[pi] is None:
                 continue
             row = list(r)
-            row[pi] = int(float(r[pi]))          # 금액을 숫자로 (SUMIFS가 문자열은 못 더함)
+            row[pi] = int(float(tables.text(r[pi])))   # 금액을 숫자로 (SUMIFS는 문자열을 못 더함)
             raw_rows.append(row)
             if di is not None and len(r) > di and r[di] is not None:
                 dates.append(r[di])
-            ctype = str(r[ti]).strip()
-            raw_market = str(r[mi]).strip()
+            ctype = tables.text(r[ti])
+            raw_market = tables.text(r[mi])
             market = RAW_MARKET_MAP.get(raw_market)
             if ctype not in CONTENT_TYPES:
                 unknown_types.add(ctype)
                 continue
             if market is None:
-                unknown_markets.add(str(r[mi]).strip())
+                unknown_markets.add(raw_market)
                 continue
-            recs.append((market, ctype, int(float(r[pi])), raw_market))
+            recs.append((market, ctype, int(float(tables.text(r[pi]))), raw_market))
     raw = dict(header=raw_header, rows=raw_rows, cols=cols, period=_period(dates))
     return recs, raw, sorted(unknown_types), sorted(unknown_markets)
 

@@ -54,7 +54,7 @@ def html_table(headers, rows, cls="ftbl"):
 
 
 def pct(v, digits=2):
-    return '<td class="mut">-</td>' if not v else "%.*f%%" % (digits, v * 100)
+    return "-" if not v else "%.*f%%" % (digits, v * 100)
 
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -62,6 +62,12 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 def num(v, dash_if_zero=False):
     return "-" if (dash_if_zero and not v) else format(v, ",")
+
+
+def money(v):
+    """소수점이 있으면 살려서 보여준다 (마켓 수수료 1,417.5 처럼)."""
+    f = float(v)
+    return format(int(f), ",") if f == int(f) else format(f, ",.2f")
 
 
 st.title("🧾 OGQ 정산")
@@ -85,10 +91,11 @@ def page_naver():
         with left:
             st.subheader("1. 로우 데이터 CSV")
             csv_file = st.file_uploader(
-                "네이버 출신 크리에이터 타 마켓 판매 로우 데이터", type=["csv"], key="csv")
-            st.markdown('<p class="hint">필수 컬럼: 거래시간 · 거래 ID · 거래유형 · 크리에이터ID · '
-                        '판매마켓 ID · 판매마켓 · 상품 코드 · 상품명 · 가격</p>',
-                        unsafe_allow_html=True)
+                "네이버 출신 크리에이터 타 마켓 판매 로우 데이터",
+                type=["csv", "xlsx", "numbers"], key="csv")
+            st.markdown('<p class="hint">CSV · 엑셀 · 넘버스 모두 됩니다. 필수 컬럼: 거래시간 · '
+                        '거래 ID · 거래유형 · 크리에이터ID · 판매마켓 ID · 판매마켓 · '
+                        '상품 코드 · 상품명 · 가격</p>', unsafe_allow_html=True)
         with right:
             st.subheader("2. 기존 추합본 (선택)")
             xlsx_files = st.file_uploader(
@@ -107,7 +114,7 @@ def page_naver():
             st.info("CSV를 올리면 마켓별 집계와 다운로드 버튼이 나타납니다.")
         else:
             try:
-                records = core.read_csv(csv_file.getvalue())
+                records = core.read_csv(csv_file.getvalue(), csv_file.name)
             except Exception as e:                               # noqa: BLE001
                 st.error("CSV를 읽지 못했습니다 — %s" % e)
 
@@ -154,11 +161,19 @@ def page_naver():
                     '<tbody>%s</tbody></table></div>' % body, unsafe_allow_html=True)
         st.write("")
 
-        with st.expander("상세 — 건수 · 수수료율 · 처리 내역"):
-            html_table(["판매마켓", "시트", "건수", "판매액", "수수료율", "정산금", "처리"],
+        with st.expander("상세 — 수수료를 어떻게 뗐는지 · 건수 · 처리 내역"):
+            st.markdown('<p class="hint">판매액 − ① 결제 수수료 − ② 마켓 수수료 = 정산 대상 금액 · '
+                        '정산금 = 정산 대상 금액 × 15%</p>', unsafe_allow_html=True)
+            html_table(["판매마켓", "건수", "판매액", "① 결제", "② 마켓",
+                        "정산 대상 금액", "정산금", "처리"],
                        [[
-                           "<td><b>%s</b></td>" % r["market"], "<td>%s</td>" % r["sheet"],
-                           num(r["rows"]), num(r["total"]), "%.5f%%" % (r["rate"] * 100),
+                           "<td><b>%s</b></td>" % r["market"], num(r["rows"]),
+                           num(r["total"]),
+                           "%s<br><small>%s</small>" % (money(r["calc"]["pay"]),
+                                                        pct(r["obj"].pay_fee)),
+                           "%s<br><small>%s</small>" % (money(r["calc"]["market_fee"]),
+                                                        pct(r["obj"].market_fee, 3)),
+                           money(r["calc"]["base"]),
                            '<td class="hi">%s</td>' % num(r["fee"]),
                            "<td>%s</td>" % ("신규 파일" if r["is_new"]
                                             else ("기존 %d건과 병합" % r["merged"]
@@ -175,13 +190,24 @@ def page_naver():
                         % items, unsafe_allow_html=True)
 
         st.subheader("다운로드")
+        stamp = datetime.now().strftime("%Y%m")
+        combined = core.build_combined(results)
+        combined_name = "네이버출신작가_정산_전체합본_%s.xlsx" % stamp
+        st.download_button(
+            "⬇ 전체 합본 파일 받기 (정산 요약 + 마켓별 전체 내역 + 수수료 안내)",
+            combined, combined_name, XLSX_MIME, type="primary", use_container_width=True)
+        st.markdown('<p class="hint">합본에는 마켓별 전체 거래 내역이 시트로 들어가고, '
+                    '요약 시트가 그 내역을 수식으로 합산합니다. 아래 개별 파일은 기존 '
+                    '추합본에 새 정산 시트를 붙인 것입니다.</p>', unsafe_allow_html=True)
+
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(combined_name, combined)
             for r in results:
                 z.writestr(r["filename"], r["bytes"])
-        st.download_button("📦 전체 %d개 파일 ZIP으로 받기" % len(results), zbuf.getvalue(),
-                           "추합본_%s.zip" % datetime.now().strftime("%Y%m"),
-                           "application/zip", type="primary", use_container_width=True)
+        st.download_button("📦 합본 + 마켓별 %d개 ZIP으로 받기" % len(results), zbuf.getvalue(),
+                           "추합본_%s.zip" % stamp,
+                           "application/zip", use_container_width=True)
         cols = st.columns(min(3, len(results)) or 1)
         for i, r in enumerate(results):
             with cols[i % len(cols)]:
@@ -198,14 +224,16 @@ def page_naver():
         for m in core.MARKETS:
             b = core.breakdown(amount, m)
             rows.append(["<td><b>%s</b></td>" % m.label,
-                         pct(m.pay_fee), num(core.won(b["pay"])),
-                         pct(m.market_fee, 3), num(core.won(b["market"])),
-                         num(core.won(b["base"])),
-                         '<td class="hi">%s</td>' % num(core.won(b["naver"]))])
+                         pct(m.pay_fee), money(b["pay"]),
+                         pct(m.market_fee, 3), money(b["market"]),
+                         money(b["base"]),
+                         '<td class="hi">%s</td>' % num(b["naver"])])
         html_table(["판매마켓", "결제 수수료율", "결제 수수료", "마켓 수수료율", "마켓 수수료",
                     "정산 대상 금액", "네이버 수수료 (15%)"], rows)
         st.markdown('<p class="hint">정산 대상 금액 = 판매액 − 결제 수수료 − 마켓 수수료 · '
-                    '네이버 수수료 = 정산 대상 금액 × 15%</p>', unsafe_allow_html=True)
+                    '네이버 수수료 = 정산 대상 금액 × 15%. 중간 단계는 반올림하지 않고 '
+                    '마지막 네이버 수수료만 원 단위로 반올림합니다.</p>',
+                    unsafe_allow_html=True)
 
     with tab_rate:
         st.subheader("마켓별 수수료율 · 추합본 규칙")
@@ -241,7 +269,8 @@ def page_stars():
             with col:
                 st.subheader("%s 파일" % name)
                 uploads[name] = st.file_uploader(
-                    "%s 월별 매출 로우 데이터" % name, type=["xlsx"], key="up_%s" % name)
+                    "%s 월별 매출 로우 데이터" % name,
+                    type=["xlsx", "csv", "numbers"], key="up_%s" % name)
         st.markdown('<p class="hint">한쪽만 올려도 됩니다. 필수 컬럼: 콘텐츠타입 · 판매마켓 · 판매금액 · '
                     '단가는 정지형(스티커) 2,000원 / 동작형(애니메이션 스티커) 3,000원 고정입니다.</p>',
                     unsafe_allow_html=True)
@@ -256,7 +285,7 @@ def page_stars():
             if not up:
                 continue
             try:
-                recs, raw, bt, bm = stars.read_account(up.getvalue())
+                recs, raw, bt, bm = stars.read_account(up.getvalue(), up.name)
             except Exception as e:                               # noqa: BLE001
                 st.error("%s 파일을 읽지 못했습니다 — %s" % (name, e))
                 return

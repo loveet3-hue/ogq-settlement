@@ -16,13 +16,36 @@ from datetime import datetime
 import openpyxl
 from decimal import Decimal, ROUND_HALF_UP
 
+import tables
+
 NAVER_SHARE = 0.15
 INFO_SHEET = "수수료 안내"
 
 
 def won(x):
     """엑셀 ROUND와 동일한 사사오입(0.5는 올림)."""
-    return int(Decimal(repr(float(x))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    d = x if isinstance(x, Decimal) else Decimal(repr(float(x)))
+    return int(d.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def settle(total, market):
+    """판매액 -> 단계별 수수료. 회사 정산 계산기와 같은 방식이다.
+
+        결제 수수료   = 판매액 × 결제율
+        마켓 수수료   = 판매액 × 마켓율
+        정산 대상 금액 = 판매액 − 결제 수수료 − 마켓 수수료
+        네이버 수수료  = ROUND(정산 대상 금액 × 15%, 0)
+
+    중간 단계는 반올림하지 않는다. 마지막 네이버 수수료만 원 단위로 반올림한다.
+    (10,000원 SOOP: 마켓 1,417.5 / 정산 대상 8,032.5 / 네이버 1,205)
+    전 과정을 Decimal로 계산해 6,000 × 0.14175 가 850.4999…로 새는 것을 막는다.
+    """
+    d = Decimal(total)
+    pay = d * Decimal(repr(market.pay_fee))
+    mk = d * Decimal(repr(market.market_fee))
+    base = d - pay - mk
+    return dict(total=total, pay=pay, market_fee=mk, base=base,
+                naver=won(base * Decimal(repr(NAVER_SHARE))))
 HEADERS = ["거래시간", "거래 ID", "거래유형", "크리에이터ID", "판매마켓 ID",
            "상품 코드", "상품명", "가격"]
 COLS = "ABCDEFGHI"
@@ -98,23 +121,35 @@ def parse_dt(value):
     return s
 
 
-def read_csv(data):
-    """bytes 또는 파일 경로를 받아 [{컬럼: 값}] 리스트로."""
-    if isinstance(data, (bytes, bytearray)):
-        text = data.decode("utf-8-sig")
-    else:
-        text = open(data, encoding="utf-8-sig").read()
-    rows = list(csv.DictReader(io.StringIO(text)))
-    missing = [c for c in FULL_HEADERS if c not in (rows[0].keys() if rows else [])]
-    if missing:
-        raise ValueError("CSV에 다음 컬럼이 없습니다: %s" % ", ".join(missing))
+def read_csv(data, filename=""):
+    """CSV · 엑셀 · 넘버스 로우 데이터를 읽어 행 리스트로 돌려준다."""
+    sheets = tables.load_sheets(data, filename)
+    found = tables.find_table(sheets, FULL_HEADERS)
+    if not found:
+        have = ", ".join(tables.text(c) for c in (sheets[0][1][0] if sheets and sheets[0][1] else []))
+        raise ValueError("필수 컬럼(%s)을 가진 표를 찾지 못했습니다. 첫 줄: %s"
+                         % (" · ".join(FULL_HEADERS), have or "(빈 파일)"))
+    _name, _header, rows, idx = found
     out = []
     for r in rows:
+        if len(r) <= max(idx.values()):
+            continue
+        cell = {k: r[i] for k, i in idx.items()}
+        if cell["거래 ID"] in (None, "") or cell["가격"] in (None, ""):
+            continue
         out.append([
-            parse_dt(r["거래시간"]), int(float(r["거래 ID"])), r["거래유형"],
-            r["크리에이터ID"], r["판매마켓 ID"], r["판매마켓"],
-            r["상품 코드"], r["상품명"], int(float(r["가격"])),
+            parse_dt(cell["거래시간"]),
+            int(float(tables.text(cell["거래 ID"]))),
+            tables.text(cell["거래유형"]),
+            tables.text(cell["크리에이터ID"]),
+            tables.text(cell["판매마켓 ID"]),
+            tables.text(cell["판매마켓"]),
+            tables.text(cell["상품 코드"]),
+            tables.text(cell["상품명"]),
+            int(float(tables.text(cell["가격"]))),
         ])
+    if not out:
+        raise ValueError("읽을 수 있는 거래가 없습니다.")
     return out
 
 
@@ -192,11 +227,15 @@ def write_sheet(wb, market, rows, tmpl=None, merge=True):
 
     ws = wb.create_sheet(name, 0)
     last = len(rows) + 2
+    total_ref = "SUM(I3:I%d)" % last
     ws["A1"] = "네이버 수수료"
-    ws["B1"] = "=SUM(I3:I%d)*%s" % (last, repr(market.rate))
-    ws["D1"] = ("판매액 합계 × %s  (결제 %s + 마켓 %s 차감 후 15%%)  ·  자세한 내용은 '%s' 시트"
-                % (_pct(market.rate, 5), _pct(market.pay_fee), _pct(market.market_fee, 3),
-                   INFO_SHEET))
+    # 안쪽 ROUND(...,6)이 없으면 6,000 × 0.14175 가 850.4999999999999 로 계산돼
+    # 850으로 잘린다 (정답 851).
+    ws["B1"] = "=ROUND(ROUND(%s*%s,6),0)" % (total_ref, repr(market.rate))
+    ws["D1"] = ("판매액에서 결제 수수료 %s, 마켓 수수료 %s를 뺀 정산 대상 금액의 15%%  "
+                "(판매액 대비 %s)  ·  계산 과정은 '%s' 시트"
+                % (_pct(market.pay_fee), _pct(market.market_fee, 3),
+                   _pct(market.rate, 5), INFO_SHEET))
     for col, h in zip(COLS, FULL_HEADERS):
         ws["%s2" % col] = h
     for i, r in enumerate(rows, start=3):
@@ -213,29 +252,35 @@ def write_sheet(wb, market, rows, tmpl=None, merge=True):
             ws["%s%d" % (col, i)]._style = copy(ws["%s3" % col]._style)
 
     total = sum(r[8] for r in rows)
+    calc = settle(total, market)
     return dict(sheet=name, rows=len(rows), merged=merged_from,
-                total=total, fee=won(total * market.rate))
+                total=total, fee=calc["naver"], calc=calc)
 
 
 def _pct(v, digits=2):
     return "-" if not v else ("%.*f%%" % (digits, v * 100)).rstrip()
 
 
-def write_info_sheet(wb, market):
-    """파일 설명과 마켓별 수수료율을 담은 안내 시트를 맨 뒤에 만든다."""
+def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None):
+    """파일 설명 · 수수료 계산 과정 · 마켓별 요율을 담은 안내 시트를 맨 뒤에 만든다.
+
+    market 과 sheet_name 을 주면 그 정산 시트를 참조하는 살아있는 계산식을 넣는다.
+    market 이 None 이면 전체 합본용 안내가 된다.
+    """
     from openpyxl.styles import Alignment, Font, PatternFill
 
     if INFO_SHEET in wb.sheetnames:
         del wb[INFO_SHEET]
     ws = wb.create_sheet(INFO_SHEET)
-    for col, w in zip("ABCDEFG", (22, 16, 16, 18, 20, 16, 22)):
+    for col, w in zip("ABCDEF", (26, 14, 18, 18, 16, 20)):
         ws.column_dimensions[col].width = w
 
     head = Font(bold=True, size=13)
     bold = Font(bold=True)
-    label = Font(bold=True, color="FF44546A")
+    label = Font(bold=True, color="FF44546A", size=11)
     band = PatternFill("solid", fgColor="FF44546A")
     mine = PatternFill("solid", fgColor="FFFFF2CC")
+    money = "#,##0.00;-#,##0.00"
 
     def put(r, c, v, font=None, fill=None, fmt=None, align=None):
         cell = ws.cell(row=r, column=c, value=v)
@@ -250,51 +295,78 @@ def write_info_sheet(wb, market):
         return cell
 
     put(1, 1, "OGQ 정산 — 네이버 출신 작가 정산", head)
-    put(2, 1, "생성기: https://ogq-settlement.streamlit.app")
+    put(2, 1, "만든 곳: https://ogq-settlement.streamlit.app")
 
     put(4, 1, "이 파일", label)
-    for i, (k, v) in enumerate([
-            ("판매마켓", market.key),
-            ("추합본 파일", market.filename),
-            ("시트 주기", "분기별 (한 시트에 3개월)" if market.cycle == "quarter"
-                          else "월별 — 정산월 = 판매월 + %d" % market.offset),
-            ("만든 날짜", datetime.now().strftime("%Y-%m-%d")),
-    ]):
+    info = ([("판매마켓", market.key),
+             ("추합본 파일", market.filename),
+             ("시트 주기", "분기별 (한 시트에 3개월)" if market.cycle == "quarter"
+                           else "월별 — 정산월 = 판매월 + %d" % market.offset)]
+            if market else
+            [("파일 종류", "전체 합본 — 마켓별 전체 내역 + 정산 요약")]
+            + ([("포함 마켓", note)] if note else []))
+    info.append(("만든 날짜", datetime.now().strftime("%Y-%m-%d")))
+    for i, (k, v) in enumerate(info):
         put(5 + i, 1, k, bold)
         put(5 + i, 2, v)
 
-    put(10, 1, "수수료 계산", label)
-    put(11, 1, "정산 대상 금액 = 판매액 − 결제 수수료 − 마켓 수수료")
-    put(12, 1, "네이버 수수료 = 정산 대상 금액 × 15%")
-    put(13, 1, "→ 판매액 대비 실효율", bold)
-    put(13, 3, market.rate, None, None, "0.00000%")
-    put(14, 1, "각 정산 시트 B1 = SUM(가격) × 실효율")
+    r = 5 + len(info) + 1
+    put(r, 1, "수수료를 어떻게 떼는가", label)
+    put(r + 1, 1, "판매액에서 ① 결제 수수료와 ② 마켓 수수료를 뺀 금액이 '정산 대상 금액'이고,")
+    put(r + 2, 1, "그 금액의 15%를 네이버가 가져갑니다. 이 15%가 정산금입니다.")
+    put(r + 3, 1, "중간 단계는 반올림하지 않고, 마지막 정산금만 원 단위로 반올림합니다.")
 
-    put(16, 1, "마켓별 수수료율", label)
-    for i, name in enumerate(["판매마켓", "결제 수수료", "마켓 수수료",
+    r += 5
+    if market and sheet_name and last_row:
+        put(r, 1, "이 파일의 계산  (시트: %s)" % sheet_name, label)
+        h = r + 1
+        for i, name in enumerate(["항목", "수수료율", "금액"]):
+            put(h, 1 + i, name, Font(bold=True, color="FFFFFFFF"), band, None, "center")
+        ref = "'%s'!I3:I%d" % (sheet_name, last_row)
+        put(h + 1, 1, "판매액 합계", bold)
+        put(h + 1, 3, "=SUM(%s)" % ref, None, None, money)
+        put(h + 2, 1, "① 결제 수수료")
+        put(h + 2, 2, market.pay_fee, None, None, "0.000%")
+        put(h + 2, 3, "=C%d*B%d" % (h + 1, h + 2), None, None, money)
+        put(h + 3, 1, "② 마켓 수수료")
+        put(h + 3, 2, market.market_fee, None, None, "0.000%")
+        put(h + 3, 3, "=C%d*B%d" % (h + 1, h + 3), None, None, money)
+        put(h + 4, 1, "정산 대상 금액 = 판매액 − ① − ②", bold)
+        put(h + 4, 3, "=C%d-C%d-C%d" % (h + 1, h + 2, h + 3), bold, None, money)
+        put(h + 5, 1, "네이버 수수료 (정산금)", bold, mine)
+        put(h + 5, 2, NAVER_SHARE, None, mine, "0%")
+        put(h + 5, 3, "=ROUND(ROUND(C%d*B%d,6),0)" % (h + 4, h + 5), bold, mine, "#,##0")
+        put(h + 6, 1, "판매액 대비 실효율")
+        put(h + 6, 2, "=IF(C%d=0,0,C%d/C%d)" % (h + 1, h + 5, h + 1), None, None, "0.00000%")
+        put(h + 7, 1, "→ 정산 시트 B1 셀의 값과 같습니다.")
+        r = h + 9
+
+    put(r, 1, "마켓별 수수료율", label)
+    for i, name in enumerate(["판매마켓", "① 결제 수수료", "② 마켓 수수료",
                               "정산 대상 비율", "네이버 몫", "판매액 대비 실효율"]):
-        put(17, 1 + i, name, Font(bold=True, color="FFFFFFFF"), band, None, "center")
+        put(r + 1, 1 + i, name, Font(bold=True, color="FFFFFFFF"), band, None, "center")
     for i, m in enumerate(MARKETS):
-        r = 18 + i
-        fill = mine if m.key == market.key else None
-        put(r, 1, m.key, bold if fill else None, fill)
-        put(r, 2, _pct(m.pay_fee), None, fill, None, "right")
-        put(r, 3, _pct(m.market_fee, 3), None, fill, None, "right")
-        put(r, 4, m.settle_ratio, None, fill, "0.000%")
-        put(r, 5, NAVER_SHARE, None, fill, "0%")
-        put(r, 6, m.rate, bold if fill else None, fill, "0.00000%")
-    put(18 + len(MARKETS), 1, "※ 노란색이 이 파일의 마켓입니다.")
+        rr = r + 2 + i
+        fill = mine if (market and m.key == market.key) else None
+        put(rr, 1, m.key, bold if fill else None, fill)
+        put(rr, 2, m.pay_fee, None, fill, "0.000%")
+        put(rr, 3, m.market_fee, None, fill, "0.000%")
+        put(rr, 4, m.settle_ratio, None, fill, "0.000%")
+        put(rr, 5, NAVER_SHARE, None, fill, "0%")
+        put(rr, 6, m.rate, bold if fill else None, fill, "0.00000%")
+    r += 2 + len(MARKETS)
+    if market:
+        put(r, 1, "※ 노란색이 이 파일의 마켓입니다.")
+        r += 1
 
-    r = 20 + len(MARKETS)
-    put(r, 1, "참고", label)
+    put(r + 1, 1, "참고", label)
     for i, line in enumerate([
-            "REFUNDMENT(환불)는 가격이 음수로 들어와 SUM에서 자동으로 차감됩니다.",
+            "REFUNDMENT(환불)는 가격이 음수로 들어와 판매액 합계에서 자동으로 차감됩니다.",
             "새 정산분은 항상 맨 앞 시트로 추가되고, 과거 시트와 서식은 그대로 둡니다.",
-            "채팅+ OGQ마켓만 분기 단위 시트라 같은 분기 시트에 이어붙입니다 "
-            "(거래 ID로 중복 제거).",
-            "수수료율이 바뀌면 이 파일이 아니라 생성기에서 고쳐야 다음 달부터 반영됩니다.",
+            "채팅+ OGQ마켓만 분기 단위 시트라 같은 분기 시트에 이어붙입니다 (거래 ID로 중복 제거).",
+            "수수료율이 바뀌면 이 파일이 아니라 만든 곳에서 고쳐야 다음 달부터 반영됩니다.",
     ]):
-        put(r + 1 + i, 1, "· " + line)
+        put(r + 2 + i, 1, "· " + line)
     return ws
 
 
@@ -338,20 +410,120 @@ def build(records, existing=None, merge=True):
             wb.remove(wb.active)
             tmpl = None
         info = write_sheet(wb, market, rows, tmpl=tmpl, merge=merge)
-        write_info_sheet(wb, market)
+        write_info_sheet(wb, market, sheet_name=info["sheet"],
+                         last_row=len(rows) + 2)
         buf = io.BytesIO()
         wb.save(buf)
         info.update(market=market.label, key=market.key, rate=market.rate,
                     filename=market.filename, bytes=buf.getvalue(),
-                    is_new=not blob, sheets=wb.sheetnames)
+                    is_new=not blob, sheets=wb.sheetnames,
+                    records=rows, obj=market)
         results.append(info)
 
     return results, unknown
 
 
 def breakdown(amount, market):
-    """계산기용: 판매액 -> 각 수수료 금액."""
-    pay = amount * market.pay_fee
-    mk = amount * market.market_fee
-    base = amount - pay - mk
-    return dict(pay=pay, market=mk, base=base, naver=base * NAVER_SHARE)
+    """계산기용: 판매액 -> 각 수수료 금액 (settle과 같은 순서)."""
+    c = settle(amount, market)
+    return dict(pay=c["pay"], market=c["market_fee"], base=c["base"], naver=c["naver"])
+
+
+def build_combined(results, title="네이버 출신 작가 정산"):
+    """마켓별 결과 -> 전체 내역 + 정산 요약을 담은 합본 워크북 bytes.
+
+    요약의 금액은 모두 수식이라 내역 시트를 고치면 따라 바뀐다.
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("정산 요약")
+
+    band = PatternFill("solid", fgColor="FF44546A")
+    yellow = PatternFill("solid", fgColor="FFFFFF00")
+    white = Font(bold=True, color="FFFFFFFF")
+    bold = Font(bold=True)
+    red = Font(bold=True, color="FFC00000")
+    money = "#,##0.00;-#,##0.00"
+
+    for col, w in zip("BCDEFGHIJKL",
+                      (18, 24, 9, 15, 13, 15, 13, 15, 16, 11, 15)):
+        ws.column_dimensions[col].width = w
+
+    ws["B1"] = title + " — 전체 합본"
+    ws["B1"].font = Font(bold=True, size=13)
+    ws["B2"] = ("판매액 − 결제 수수료 − 마켓 수수료 = 정산 대상 금액,"
+                " 그 금액의 15%가 정산금입니다.")
+
+    headers = ["판매마켓", "정산 시트", "건수", "판매액", "① 결제 수수료율",
+               "① 결제 수수료", "② 마켓 수수료율", "② 마켓 수수료",
+               "정산 대상 금액", "네이버 몫", "정산금"]
+    for i, name in enumerate(headers):
+        c = ws.cell(row=4, column=2 + i, value=name)
+        c.fill = band
+        c.font = white
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    r0 = 5
+    for i, res in enumerate(results):
+        r = r0 + i
+        m = res["obj"]
+        sheet = m.label
+        n = len(res["records"]) + 1
+        ws.cell(row=r, column=2, value=m.label).font = bold
+        ws.cell(row=r, column=3, value=res["sheet"])
+        ws.cell(row=r, column=4, value=len(res["records"])).number_format = "#,##0"
+        ws.cell(row=r, column=5, value="=SUM('%s'!I2:I%d)" % (sheet, n)).number_format = money
+        ws.cell(row=r, column=6, value=m.pay_fee).number_format = "0.000%"
+        ws.cell(row=r, column=7, value="=E%d*F%d" % (r, r)).number_format = money
+        ws.cell(row=r, column=8, value=m.market_fee).number_format = "0.000%"
+        ws.cell(row=r, column=9, value="=E%d*H%d" % (r, r)).number_format = money
+        ws.cell(row=r, column=10,
+                value="=E%d-G%d-I%d" % (r, r, r)).number_format = money
+        ws.cell(row=r, column=11, value=NAVER_SHARE).number_format = "0%"
+        c = ws.cell(row=r, column=12,
+                    value="=ROUND(ROUND(J%d*K%d,6),0)" % (r, r))
+        c.number_format = "#,##0"
+        c.font = red
+
+    rt = r0 + len(results)
+    ws.cell(row=rt, column=2, value="합계").font = bold
+    for col in "DEGIJL":
+        c = ws.cell(row=rt, column=ord(col) - 64,
+                    value="=SUM(%s%d:%s%d)" % (col, r0, col, rt - 1))
+        c.number_format = "#,##0" if col in "DL" else money
+        c.font = red if col == "L" else bold
+    for col in range(2, 13):
+        ws.cell(row=rt, column=col).fill = yellow
+
+    ws.cell(row=rt + 2, column=2,
+            value="※ 판매액은 아래 마켓별 시트에서 자동으로 합산됩니다. "
+                  "정산금만 원 단위로 반올림합니다.")
+
+    # 마켓별 전체 내역
+    for res in results:
+        sh = wb.create_sheet(res["obj"].label)
+        for col, w in zip(COLS, (18.6, 9.6, 11.4, 14.3, 13.6, 13.3, 12.7, 23.2, 9)):
+            sh.column_dimensions[col].width = w
+        for i, name in enumerate(FULL_HEADERS):
+            c = sh.cell(row=1, column=1 + i, value=name)
+            c.fill = PatternFill("solid", fgColor="FF305496")
+            c.font = white
+            c.alignment = Alignment(horizontal="center")
+        for i, row in enumerate(res["records"], start=2):
+            for j, v in enumerate(row):
+                c = sh.cell(row=i, column=1 + j, value=v)
+                if j == 0:
+                    c.number_format = "yyyy\\-mm\\-dd\\ hh:mm:ss"
+                elif j == 1:
+                    c.number_format = "0"
+                elif j == 8:
+                    c.number_format = "#,##0;-#,##0"
+        sh.freeze_panes = "A2"
+
+    write_info_sheet(wb, None, note=", ".join(r["obj"].label for r in results))
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
