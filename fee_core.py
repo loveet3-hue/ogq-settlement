@@ -108,7 +108,7 @@ class Market:
 
 
 MARKETS = [
-    Market("SOOP OGQ 마켓",  "SOOP OGQ마켓", 0.055, 0.14175, "SOOP",       "month",   offset=1),
+    Market("SOOP OGQ 마켓",  "SOOP OGQ이모티콘", 0.055, 0.14175, "SOOP",       "month",   offset=1),
     Market("채팅+ 원스토어",  "원스토어 (RCS)", 0.0,   0.40,    "RCS",        "month",   offset=2),
     Market("연합뉴스",        "연합뉴스",     0.0,   0.40,    "연합",       "month",   offset=1),
     Market("채팅+ OGQ 마켓",  "채팅+ OGQ마켓", 0.055, 0.20,    "채팅플러스", "quarter"),
@@ -310,7 +310,8 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
     put(2, 1, "만든 곳: https://ogq-settlement.streamlit.app")
 
     put(4, 1, "이 파일", label)
-    info = ([("판매마켓", market.key),
+    info = ([("판매마켓", market.label),
+             ("로우 데이터 표기", market.key),
              ("추합본 파일", market.filename),
              ("시트 주기", "분기별 (한 시트에 3개월)" if market.cycle == "quarter"
                            else "월별 — 정산월 = 판매월 + %d" % market.offset)]
@@ -361,7 +362,7 @@ def write_info_sheet(wb, market=None, sheet_name=None, last_row=None, note=None)
     for i, m in enumerate(MARKETS):
         rr = r + 2 + i
         fill = mine if (market and m.key == market.key) else None
-        put(rr, 1, m.key, bold if fill else None, fill)
+        put(rr, 1, m.label, bold if fill else None, fill)
         put(rr, 2, m.pay_fee, None, fill, "0.000%")
         put(rr, 3, m.market_fee, None, fill, "0.000%")
         put(rr, 4, m.settle_ratio, None, fill, "0.000%")
